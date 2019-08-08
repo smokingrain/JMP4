@@ -19,6 +19,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
 
 import org.jcodec.common.AudioFormat;
 import org.jcodec.common.SoundUtil;
@@ -84,6 +86,9 @@ public class Player {
     private volatile boolean resume;
     private volatile boolean decodingLocked;
     private boolean videoDecoded = false;
+    
+    private ReentrantLock lock;
+	private Condition cond;
 
     Frame[] EMPTY = new Frame[0];
     private int curFrameNo = -1;
@@ -113,6 +118,9 @@ public class Player {
         audioDrain.clear();
         video.clear();
         audio.clear();
+        
+        lock = new ReentrantLock();
+        cond = lock.newCondition();
 
         AudioInfo ai = audioSource.getAudioInfo();
         af = ai.getFormat();
@@ -195,6 +203,7 @@ public class Player {
                 Debug.println("Resume thread done");
             }
         };
+        resumeThread.setName("startResumeThread");
         resumeThread.setDaemon(true);
         resumeThread.start();
     }
@@ -211,6 +220,7 @@ public class Player {
                 Debug.println("Playing video done");
             }
         };
+        videoPlaybackThread.setName("startVideoPlayback");
         videoPlaybackThread.start();
     }
 
@@ -244,6 +254,15 @@ public class Player {
                     show(selected);
                     surePut(videoDrain, createTarget());
                     
+                }
+                if(video.size() < VIDEO_QUEUE_SIZE / 2) {
+                	lock.lock();
+                	try {
+						cond.signalAll();
+					} catch (Exception e) {
+					} finally {
+						lock.unlock();
+					}
                 }
             } else {
                 synchronized (pausedEvent) {
@@ -329,6 +348,7 @@ public class Player {
                 Debug.println("Decoding video done");
             }
         };
+        videoDecodeThread.setName("VideoDecode");
         videoDecodeThread.start();
     }
 
@@ -344,6 +364,7 @@ public class Player {
                 Debug.println("Decoding audio done");
             }
         };
+        audioDecodeThread.setName("AudioDecode");
         audioDecodeThread.start();
     }
 
@@ -403,8 +424,17 @@ public class Player {
     private int frameDecoded = 0;
 
     private void decodeJustOneFrame() throws IOException {
-    	if(video.size() == VIDEO_QUEUE_SIZE) {
-    		return;
+    	if(video.size() >= VIDEO_QUEUE_SIZE) {
+    		System.out.println("video full, waiting....");
+    		lock.lock();
+    		try {
+				cond.await();
+			} catch (InterruptedException e) {
+				e.printStackTrace();
+				return;
+			} finally {
+				lock.unlock();
+			}
     	}
         byte[][] buf = take(videoDrain, 20);
         if (buf == null) {
@@ -606,6 +636,13 @@ public class Player {
 			audioSource.close();
 		} catch (IOException e) {
 			e.printStackTrace();
+		}
+        lock.lock();
+    	try {
+			cond.signalAll();
+		} catch (Exception e) {
+		} finally {
+			lock.unlock();
 		}
         joinForSure(videoDecodeThread);
         joinForSure(audioDecodeThread);
